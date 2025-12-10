@@ -290,3 +290,58 @@ def marginal_distribution(X, U_max, S_max, t, states):
 #     A_rev = A_rev_off - diags(row_sums)
 
 #     return A_rev
+
+@lru_cache(maxsize=None)
+def get_A_rev_sparse(state_idx, k):
+    mu_k = X_fwd_gene[:, k]
+    return reverse_generator_sparse(A_gene[state_idx], mu_k)
+
+def backward_distribution_sparse(Y, Q, A, X_fwd, gene_idx, cell_idx, states, index_for, t, tau, state_grid):
+    # Y: U and S count matrices
+    # A: list of generator matrices (for gene j) for each alpha
+    # X_fwd: forward distribution (for gene j)
+    # Q: posterior probability of each cell (shape: # cells x len(t))
+    # cell_idx: working cell index
+    # gene_idx: working gene_index
+
+    ###########################################################################
+
+    # For each time step, calculate the cell's previous state using its current state
+
+    # Initialize backwards trajectory with observed counts
+    u_curr, s_curr = Y[cell_idx, gene_idx, 0], Y[cell_idx, gene_idx, 1]
+    x_curr = np.zeros(shape=(A[0].shape[0],), dtype="float")
+    x_curr[index_for[(u_curr, s_curr)]] = 1.0
+    
+    # Start backwards trajectory at cell's inferred position in time
+    t_obs = np.argmax(Q[cell_idx, :])
+    X_bw = np.zeros(shape=(len(states), len(t))) 
+    X_bw[:, t_obs] = x_curr
+
+    for k in reversed(range(1, t_obs + 1)):
+        t_prev, t_curr = t[k-1], t[k]
+        state_prev, state_curr = state_grid[k-1], state_grid[k]
+        x_curr = X_bw[:, k]
+        mu_k = X_fwd[:, k]
+            
+        if state_prev == state_curr:
+            dt = t_curr - t_prev
+            A_rev = get_A_rev_sparse(state_curr, mu_k)
+            x_prev = expm_multiply(A_rev.T * dt, x_curr) 
+             
+        else:
+            # State switch happens in current interval             
+            t_s = tau[state_curr]
+
+            # Split backward march into 2 steps
+            dt2 = t_curr - t_s # right interval: (state_switch_time, t_k]
+            A_rev2 = reverse_generator_sparse(A[state_curr], mu_k)
+            x_mid = expm_multiply(A_rev2.T * dt2, x_curr) 
+            
+            dt1 = t_s - t_prev # left interval: (t_{k-1}, state_switch_time]
+            A_rev1 = reverse_generator_sparse(A[state_prev], mu_k) 
+            x_prev = expm_multiply(A_rev1.T * dt1, x_mid) 
+    
+        X_bw[:, k-1] = x_prev
+        
+    return X_bw
