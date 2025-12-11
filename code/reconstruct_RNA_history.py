@@ -1,9 +1,9 @@
 
 import numpy as np
-import scipy as sp
 import scipy.linalg as la
+from scipy.stats import poisson
 from functools import lru_cache
-from scipy.sparse.linalg import expm_multiply, eigs
+from scipy.sparse.linalg import expm_multiply
 from scipy.sparse import coo_matrix, csr_matrix, diags
 
 class Reaction:
@@ -58,14 +58,31 @@ def create_transition_matrix(reactions, states, index_for, U_max, S_max):
     
     return A
 
-def stationary_from_transition_matrix(A): 
-    w, v = np.linalg.eig(A.T)
-    idx = np.argmin(np.abs(w)) # Eigenvector corresponding to eigenvalue closest to 0
-    pi = np.real(v[:, idx])
-    if pi.sum() < 0:
-        pi = -pi
-    pi[pi < 0] = 0.0
-    pi /= pi.sum()
+# def stationary_from_transition_matrix(A): 
+#     w, v = np.linalg.eig(A.T)
+#     idx = np.argmin(np.abs(w)) # Eigenvector corresponding to eigenvalue closest to 0
+#     pi = np.real(v[:, idx])
+#     if pi.sum() < 0:
+#         pi = -pi
+#     pi[pi < 0] = 0.0
+#     pi /= pi.sum()
+#     return pi
+
+def stationary_from_params(alpha, beta, gamma, states):
+    mean_u = alpha / beta
+    mean_s = alpha / gamma
+
+    # unpack states into arrays
+    u_vals = np.array([u for (u, s) in states], dtype=int)
+    s_vals = np.array([s for (u, s) in states], dtype=int)
+
+    # Poisson pmf for each state coordinate
+    p_u = poisson.pmf(u_vals, mean_u)
+    p_s = poisson.pmf(s_vals, mean_s)
+
+    pi = p_u * p_s  # independent U and S
+    pi /= pi.sum()  # renormalize on truncated grid
+
     return pi
 
 def reverse_generator(A, mu):
@@ -81,6 +98,22 @@ def reverse_generator(A, mu):
     A_rev[np.diag_indices_from(A_rev)] = -A_rev_off.sum(axis=1) # Diagonals must be -sum(row)
     return A_rev
 
+def marginal_distribution(X, U_max, S_max, t, states):
+    X_u = np.zeros(shape=(U_max + 1, len(t)))
+    X_s = np.zeros(shape=(S_max + 1, len(t)))
+
+    for k in range(0, len(t)):
+        for i in range(U_max + 1):
+            s_state_indices = [idx for idx, st in enumerate(states) if st[0] == i]
+            # Sum probs over all possible S corresponding to the i-th U
+            X_u[i, k] = np.sum(X[s_state_indices, k])
+            
+        for i in range(S_max + 1):
+            u_state_indices = [idx for idx, st in enumerate(states) if st[1] == i]
+            X_s[i, k] = np.sum(X[u_state_indices, k])
+    
+    return X_u, X_s
+
 A_gene = None
 X_fwd_gene = None
 
@@ -93,20 +126,20 @@ def get_expm_per_gene(state_idx, dt):
     return la.expm(A_k * dt)
 
 @lru_cache(maxsize=None)
-def get_expm_rev_per_gene(state_idx, k, dt):
-    """
-    Cached expm(A_rev(state_idx, k) * dt) for BACKWARD direction.
-    """
-    A_rev = get_A_rev(state_idx, k)
-    return la.expm(A_rev * dt)
-
-@lru_cache(maxsize=None)
 def get_A_rev(state_idx, k):
     """
     Cached reverse generator A_rev for BACKWARD direction at time index k.
     """
     mu_k = X_fwd_gene[:, k]
     return reverse_generator(A_gene[state_idx], mu_k)
+
+@lru_cache(maxsize=None)
+def get_expm_rev_per_gene(state_idx, k, dt):
+    """
+    Cached expm(A_rev(state_idx, k) * dt) for BACKWARD direction.
+    """
+    A_rev = get_A_rev(state_idx, k)
+    return la.expm(A_rev * dt)
 
 def forward_distribution(A, pi, states, t, tau, state_grid):
     global A_gene, X_fwd_gene
@@ -126,7 +159,7 @@ def forward_distribution(A, pi, states, t, tau, state_grid):
         if state_curr == state_next:
             dt = t_next - t_curr
             M = get_expm_per_gene(state_curr, dt)
-            x_next = x_curr @ M 
+            x_next = x_curr @ M
             
         else:   
             # State switch happens in current interval
@@ -146,24 +179,19 @@ def forward_distribution(A, pi, states, t, tau, state_grid):
     X_fwd_gene = X_fwd
     return X_fwd
  
-def backward_distribution(Y, Q, A, X_fwd, gene_idx, cell_idx, states, index_for, t, tau, state_grid):
+def backward_distribution(Y, Q, gene_idx, cell_idx, states, index_for, t, tau, state_grid):
     # Y: U and S count matrices
-    # A: list of generator matrices (for gene j) for each alpha
-    # X_fwd: forward distribution (for gene j)
     # Q: posterior probability of each cell (shape: # cells x len(t))
     # cell_idx: working cell index
     # gene_idx: working gene_index
 
-    ###########################################################################
-
     global A_gene, X_fwd_gene
-    A_gene = A
-    
+        
     # For each time step, calculate the cell's previous state using its current state
 
     # Initialize backwards trajectory with observed counts
     u_curr, s_curr = Y[cell_idx, gene_idx, 0], Y[cell_idx, gene_idx, 1]
-    x_curr = np.zeros(shape=(A[0].shape[0],), dtype="float")
+    x_curr = np.zeros(shape=(len(states),), dtype="float")
     x_curr[index_for[(u_curr, s_curr)]] = 1.0
     
     # Start backwards trajectory at cell's inferred position in time
@@ -175,7 +203,6 @@ def backward_distribution(Y, Q, A, X_fwd, gene_idx, cell_idx, states, index_for,
         t_prev, t_curr = t[k-1], t[k]
         state_prev, state_curr = state_grid[k-1], state_grid[k]
         x_curr = X_bw[:, k]
-        mu_k = X_fwd[:, k]
             
         if state_prev == state_curr:
             dt = t_curr - t_prev
@@ -190,67 +217,55 @@ def backward_distribution(Y, Q, A, X_fwd, gene_idx, cell_idx, states, index_for,
 
             # Split backward march into 2 steps
             dt2 = t_curr - t_s # right interval: (state_switch_time, t_k]
-            A_rev2 = reverse_generator(A[state_curr], mu_k)
-            x_mid = expm_multiply(A_rev2.T * dt2, x_curr) 
+            M2_rev = get_expm_rev_per_gene(state_curr, k, dt2)
+            x_mid = x_curr @ M2_rev 
             
             dt1 = t_s - t_prev # left interval: (t_{k-1}, state_switch_time]
-            A_rev1 = reverse_generator(A[state_prev], mu_k) 
-            x_prev = expm_multiply(A_rev1.T * dt1, x_mid) 
-    
+            M1_rev = get_expm_rev_per_gene(state_prev, k, dt1)
+            x_prev = x_mid @ M1_rev  
+
         X_bw[:, k-1] = x_prev
-        
-    return X_bw
-
-def marginal_distribution(X, U_max, S_max, t, states):
-    X_u = np.zeros(shape=(U_max + 1, len(t)))
-    X_s = np.zeros(shape=(S_max + 1, len(t)))
-
-    for k in range(0, len(t)):
-        for i in range(U_max + 1):
-            s_state_indices = [idx for idx, st in enumerate(states) if st[0] == i]
-            # Sum probs over all possible S corresponding to the i-th U
-            X_u[i, k] = np.sum(X[s_state_indices, k])
+                            
+    # A_rev2 = reverse_generator(A[state_curr], mu_k)
+    # x_mid = expm_multiply(A_rev2.T * dt2, x_curr) 
+    # A_rev1 = reverse_generator(A[state_prev], mu_k) 
+    # x_prev = expm_multiply(A_rev1.T * dt1, x_mid) 
             
-        for i in range(S_max + 1):
-            u_state_indices = [idx for idx, st in enumerate(states) if st[1] == i]
-            X_s[i, k] = np.sum(X[u_state_indices, k])
-    
-    return X_u, X_s
+    return X_bw
 
 ################################################################################
 
+def create_transition_matrix_sparse(reactions, states, index_for, U_max, S_max):
+    data = []
+    rows = []
+    cols = []
 
-# def create_transition_matrix_sparse(reactions, states, index_for, U_max, S_max):
-#     data = []
-#     rows = []
-#     cols = []
-
-#     for i, (u, s) in enumerate(states):
-#         out_rate = 0.0
-#         for rxn in reactions:
-#             u2 = u + rxn.dU
-#             s2 = s + rxn.dS
+    for i, (u, s) in enumerate(states):
+        out_rate = 0.0
+        for rxn in reactions:
+            u2 = u + rxn.dU
+            s2 = s + rxn.dS
             
-#             if (u2 < 0) or (u2 > U_max) or (s2 < 0) or (s2 > S_max):
-#                 continue
+            if (u2 < 0) or (u2 > U_max) or (s2 < 0) or (s2 > S_max):
+                continue
 
-#             rate = rxn.rate_fn(u, s)
-#             j = index_for[(u2, s2)]
-#             rows.append(i)
-#             cols.append(j)
-#             data.append(rate)
-#             out_rate += rate
+            rate = rxn.rate_fn(u, s)
+            j = index_for[(u2, s2)]
+            rows.append(i)
+            cols.append(j)
+            data.append(rate)
+            out_rate += rate
 
-#         # diagonal
-#         rows.append(i)
-#         cols.append(i)
-#         data.append(-out_rate)
+        # diagonal
+        rows.append(i)
+        cols.append(i)
+        data.append(-out_rate)
 
-#     n_states = len(states)
-#     A_sparse = csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
-#     return A_sparse
+    n_states = len(states)
+    A_sparse = csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+    return A_sparse
 
-# def stationary_from_transition_matrix_sparse(A) 
+# def stationary_from_transition_matrix_sparse(A):
 #     AT = A.T
 #     # eigenvector associated with eigenvalue closest to 0
 #     w, v = eigs(AT, k=1, sigma=0.0)
@@ -261,56 +276,165 @@ def marginal_distribution(X, U_max, S_max, t, states):
 #     pi /= pi.sum()
 #     return pi
 
-# def reverse_generator_sparse(A, mu):
-#     ## Some refs for getting reverse time Markov generator:
-#     ## https://arxiv.org/abs/2502.19183 (p. 3)
-#     ## https://www.randomservices.org/random/markov/TimeReversal2.html
-#     ## https://link.springer.com/book/10.1007/978-1-4612-3038-0 (p. 239)
+def reverse_generator_sparse(A, mu):
+    ## Some refs for getting reverse time Markov generator:
+    ## https://arxiv.org/abs/2502.19183 (p. 3)
+    ## https://www.randomservices.org/random/markov/TimeReversal2.html
+    ## https://link.springer.com/book/10.1007/978-1-4612-3038-0 (p. 239)
  
-#     # Work with A^T in COO format (easy access to row/col/data)
-#     A_T = A.T.tocoo()
+    # Work with A^T in COO format (easy access to row/col/data)
+    A_T = A.T.tocoo()
 
-#     # For A_T (i,j) = A[j,i]
-#     # Want A_rev_off[i,j] = A[j,i] * mu[j] / mu[i] for i != j
-#     data = A_T.data * mu[A_T.row] / mu[A_T.col]
+    # For A_T (i,j) = A[j,i]
+    # Want A_rev_off[i,j] = A[j,i] * mu[j] / mu[i] for i != j
+    data = A_T.data * mu[A_T.row] / mu[A_T.col]
 
-#     # Remove diagonal entries (i == j)
-#     mask = A_T.row != A_T.col
-#     row_off = A_T.row[mask]
-#     col_off = A_T.col[mask]
-#     data_off = data[mask]
+    # Remove diagonal entries (i == j)
+    mask = A_T.row != A_T.col
+    row_off = A_T.row[mask]
+    col_off = A_T.col[mask]
+    data_off = data[mask]
 
-#     n = A.shape[0]
-#     A_rev_off = coo_matrix((data_off, (row_off, col_off)), shape=(n, n)).tocsr()
+    n = A.shape[0]
+    A_rev_off = coo_matrix((data_off, (row_off, col_off)), shape=(n, n)).tocsr()
 
-#     # Row sums for diagonal (ensure rows sum to 0)
-#     row_sums = np.array(A_rev_off.sum(axis=1)).ravel()
+    # Row sums for diagonal (ensure rows sum to 0)
+    row_sums = np.array(A_rev_off.sum(axis=1)).ravel()
+    A_rev = A_rev_off - diags(row_sums)
 
-#     # A_rev = A_rev_off - diag(row_sums)
-#     A_rev = A_rev_off - diags(row_sums)
+    return A_rev
 
-#     return A_rev
+def forward_distribution_sparse(A, pi, states, t, tau, state_grid):
+    global A_gene, X_fwd_gene
+    A_gene = A 
+    
+    n_states = len(states)
+    n_t = len(t)
+
+    X_fwd = np.zeros((n_states, n_t))
+    # I’m taking pi as the distribution at t[0]
+    X_fwd[:, 0] = pi
+
+    k = 0
+    while k < n_t - 1:
+        s = state_grid[k]
+
+        # ---- find maximal constant-state block starting at k ----
+        k_block_end = k
+        while (
+            k_block_end < n_t - 1
+            and state_grid[k_block_end] == state_grid[k_block_end + 1]
+        ):
+            k_block_end += 1
+
+        if k_block_end > k:
+            # ---- constant generator A[s] on [t_k, ..., t_{k_block_end}] ----
+            A_s_T = A[s].T
+
+            # total time span and number of timepoints in this block
+            t_start = t[k]
+            t_end = t[k_block_end]
+            num = k_block_end - k + 1  # including the starting point
+
+            # evolve from X_fwd[:, k] over this whole block
+            # expm_multiply will compute e^{A_s_T * tau_j} X_fwd[:,k] for
+            # tau_j linearly spaced between 0 and (t_end - t_start)
+            block = expm_multiply(
+                A_s_T,
+                X_fwd[:, k],
+                start=0.0,
+                stop=t_end - t_start,
+                num=num,
+            )
+            # block.shape == (num, n_states); we want columns = time
+            X_fwd[:, k : k_block_end + 1] = block.T
+
+            k = k_block_end  # jump to the end of the block
+
+        else:
+            # ---- single step where state changes within this interval ----
+            t_curr, t_next = t[k], t[k+1]
+            state_curr, state_next = state_grid[k], state_grid[k+1]
+            x_curr = X_fwd[:, k]
+
+            if state_curr == state_next:
+                # (shouldn't really happen here, but keep for safety)
+                dt = t_next - t_curr
+                x_next = expm_multiply(A[state_curr].T * dt, x_curr)
+            else:
+                # State switch happens somewhere inside (t_curr, t_next]
+                t_s = tau[state_next]
+
+                # left sub-interval: [t_curr, t_s)
+                dt1 = t_s - t_curr
+                x_mid = expm_multiply(A[state_curr].T * dt1, x_curr)
+
+                # right sub-interval: [t_s, t_next]
+                dt2 = t_next - t_s
+                x_next = expm_multiply(A[state_next].T * dt2, x_mid)
+
+            X_fwd[:, k+1] = x_next
+            k += 1
+
+    X_fwd_gene = X_fwd
+    return X_fwd
+
+# def forward_distribution_sparse(A, pi, states, t, tau, state_grid):
+#     global A_gene, X_fwd_gene
+#     A_gene = A 
+    
+#     # For each time step, calculate next state using current state
+    
+#     X_fwd = np.zeros(shape=(len(states), len(t)))
+#     dt = np.mean(np.diff(t)) 
+#     X_fwd[:, 0] = expm_multiply(A[0].T * dt, pi) # Use stationary distribution at t < 0 (system starts in steady state)
+    
+#     for k in range(0, len(t)-1): 
+#         t_curr, t_next = t[k], t[k+1]
+#         state_curr, state_next = state_grid[k], state_grid[k+1]
+#         x_curr = X_fwd[:, k]
+               
+#         if state_curr == state_next:
+#             dt = t_next - t_curr
+#             A_k = A[state_curr]
+#             x_next = expm_multiply(A_k.T * dt, x_curr) 
+            
+#         else:   
+#             # State switch happens in current interval
+#             t_s = tau[state_next]
+
+#             # Split backward march into 2 steps
+#             dt1 = t_s - t_curr # left interval: [t_k, state_switch_time)
+#             A_k1 = A[state_curr]
+#             x_mid = expm_multiply(A_k1.T * dt1, x_curr)
+      
+#             dt2 = t_next - t_s # right interval: [state_switch_time, t_{k+1})
+#             A_k2 = A[state_next]
+#             x_next = expm_multiply(A_k2.T * dt2, x_mid)
+        
+#         X_fwd[:, k+1] = x_next
+    
+#     X_fwd_gene = X_fwd
+#     return X_fwd
 
 @lru_cache(maxsize=None)
 def get_A_rev_sparse(state_idx, k):
     mu_k = X_fwd_gene[:, k]
     return reverse_generator_sparse(A_gene[state_idx], mu_k)
 
-def backward_distribution_sparse(Y, Q, A, X_fwd, gene_idx, cell_idx, states, index_for, t, tau, state_grid):
+def backward_distribution_sparse(Y, Q, gene_idx, cell_idx, states, index_for, t, tau, state_grid):
     # Y: U and S count matrices
-    # A: list of generator matrices (for gene j) for each alpha
-    # X_fwd: forward distribution (for gene j)
     # Q: posterior probability of each cell (shape: # cells x len(t))
     # cell_idx: working cell index
     # gene_idx: working gene_index
 
-    ###########################################################################
-
+    global A_gene, X_fwd_gene
+    
     # For each time step, calculate the cell's previous state using its current state
 
     # Initialize backwards trajectory with observed counts
     u_curr, s_curr = Y[cell_idx, gene_idx, 0], Y[cell_idx, gene_idx, 1]
-    x_curr = np.zeros(shape=(A[0].shape[0],), dtype="float")
+    x_curr = np.zeros(shape=(len(states),), dtype="float")
     x_curr[index_for[(u_curr, s_curr)]] = 1.0
     
     # Start backwards trajectory at cell's inferred position in time
@@ -322,11 +446,10 @@ def backward_distribution_sparse(Y, Q, A, X_fwd, gene_idx, cell_idx, states, ind
         t_prev, t_curr = t[k-1], t[k]
         state_prev, state_curr = state_grid[k-1], state_grid[k]
         x_curr = X_bw[:, k]
-        mu_k = X_fwd[:, k]
             
         if state_prev == state_curr:
             dt = t_curr - t_prev
-            A_rev = get_A_rev_sparse(state_curr, mu_k)
+            A_rev = get_A_rev_sparse(state_curr, k)
             x_prev = expm_multiply(A_rev.T * dt, x_curr) 
              
         else:
@@ -335,11 +458,11 @@ def backward_distribution_sparse(Y, Q, A, X_fwd, gene_idx, cell_idx, states, ind
 
             # Split backward march into 2 steps
             dt2 = t_curr - t_s # right interval: (state_switch_time, t_k]
-            A_rev2 = reverse_generator_sparse(A[state_curr], mu_k)
+            A_rev2 = get_A_rev_sparse(state_curr, k) # reverse_generator_sparse(A[state_curr], mu_k)
             x_mid = expm_multiply(A_rev2.T * dt2, x_curr) 
             
             dt1 = t_s - t_prev # left interval: (t_{k-1}, state_switch_time]
-            A_rev1 = reverse_generator_sparse(A[state_prev], mu_k) 
+            A_rev1 = get_A_rev_sparse(state_prev, k) # reverse_generator_sparse(A[state_prev], mu_k) 
             x_prev = expm_multiply(A_rev1.T * dt1, x_mid) 
     
         X_bw[:, k-1] = x_prev
