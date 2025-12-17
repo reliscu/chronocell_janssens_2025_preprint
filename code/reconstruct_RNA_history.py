@@ -170,7 +170,7 @@ def forward_distribution(A, pi, states, t, tau, state_grid):
     X_fwd_gene = X_fwd
     return X_fwd
  
-def backward_distribution(Y, Q, gene_idx, states, index_for, t, tau, state_grid):
+def backward_distribution(Y, Q, states, index_for, t, tau, state_grid):
     # Y: U and S count matrices
     # Q: posterior probability of each cell (shape: # cells x len(t))
 
@@ -179,7 +179,7 @@ def backward_distribution(Y, Q, gene_idx, states, index_for, t, tau, state_grid)
     n_cells = Y.shape[0]
 
     # Initialize backwards trajectory with observed counts
-    U_curr, S_curr = Y[:, gene_idx, 0], Y[:, gene_idx, 1]
+    U_curr, S_curr = Y[:, 0], Y[:, 1]
     X_curr = np.zeros(shape=(len(states), n_cells), dtype="float")
     for cell_idx in range(n_cells):
         X_curr[index_for[(U_curr[cell_idx], S_curr[cell_idx])], cell_idx] = 1.0 
@@ -192,15 +192,15 @@ def backward_distribution(Y, Q, gene_idx, states, index_for, t, tau, state_grid)
     for k in reversed(range(1, len(t))):
         t_prev, t_curr = t[k-1], t[k]
         state_prev, state_curr = state_grid[k-1], state_grid[k]
-        
+
         # Only calculate backwards trajectory for cells at t = t[k] or later
         mask = t_obs >= k
-        X_bw[:, k, mask] = X_curr[:, mask]
-
+        X_curr_block = X_curr[:, mask]
+        
         if state_prev == state_curr:
             dt = t_curr - t_prev
             M_rev = get_expm_rev(state_curr, k, dt)
-            X_prev = (X_curr[:, mask].T @ M_rev).T
+            X_prev = (X_curr_block.T @ M_rev).T
             
         else:
             # State switch happens in current interval             
@@ -209,15 +209,17 @@ def backward_distribution(Y, Q, gene_idx, states, index_for, t, tau, state_grid)
             # Split backward march into 2 steps
             dt2 = t_curr - t_s # right interval: (state_switch_time, t_k]
             M2_rev = get_expm_rev(state_curr, k, dt2)
-            X_mid = (X_curr[:, mask].T @ M2_rev)
+            X_mid = (X_curr_block.T @ M2_rev)
             
             dt1 = t_s - t_prev # left interval: (t_{k-1}, state_switch_time]
             M1_rev = get_expm_rev(state_prev, k, dt1)
             X_prev = (X_mid @ M1_rev).T
 
+        X_bw[:, k, mask] = X_curr_block
         X_curr[:, mask] = X_prev
-        X_bw[:, k-1, mask] = X_prev
-    
+        
+    X_bw[:, k-1, mask] = X_prev
+
     # Cells at t=0 only have observed data
     mask = t_obs == 0   
     X_bw[:, 0, mask] = X_curr[:, mask]
@@ -367,8 +369,7 @@ def get_A_rev_sparse(state_idx, k):
     mu_k = X_fwd_gene[:, k]
     return reverse_generator_sparse(A_gene[state_idx], mu_k)
 
-
-def backward_distribution_sparse(Y, Q, gene_idx, states, index_for, t, tau, state_grid):
+def backward_distribution_sparse(Y, Q, states, index_for, t, tau, state_grid):
     # Y: U and S count matrices
     # Q: posterior probability of each cell (shape: # cells x len(t))
 
@@ -377,7 +378,7 @@ def backward_distribution_sparse(Y, Q, gene_idx, states, index_for, t, tau, stat
     n_cells = Y.shape[0]
 
     # Initialize backwards trajectory with observed counts
-    U_curr, S_curr = Y[:, gene_idx, 0], Y[:, gene_idx, 1]
+    U_curr, S_curr = Y[:, 0], Y[:, 1]
     X_curr = np.zeros(shape=(len(states), n_cells), dtype="float")
     for cell_idx in range(n_cells):
         X_curr[index_for[(U_curr[cell_idx], S_curr[cell_idx])], cell_idx] = 1.0 
@@ -393,12 +394,12 @@ def backward_distribution_sparse(Y, Q, gene_idx, states, index_for, t, tau, stat
         
         # Only calculate backwards trajectory for cells at t = t[k] or later
         mask = t_obs >= k
-        X_bw[:, k, mask] = X_curr[:, mask]
+        X_curr_block = X_curr[:, mask]
 
         if state_prev == state_curr:
             dt = t_curr - t_prev
             A_rev = get_A_rev_sparse(state_curr, k)
-            X_prev = expm_multiply(A_rev.T * dt, X_curr) 
+            X_prev = expm_multiply(A_rev.T * dt, X_curr_block) 
             
         else:
             # State switch happens in current interval             
@@ -406,20 +407,22 @@ def backward_distribution_sparse(Y, Q, gene_idx, states, index_for, t, tau, stat
 
             # Split backward march into 2 steps
             dt2 = t_curr - t_s # right interval: (state_switch_time, t_k]
-            A_rev2 = get_A_rev_sparse(state_curr, k) # reverse_generator_sparse(A[state_curr], mu_k)
-            X_mid = expm_multiply(A_rev2.T * dt2, X_curr) 
+            A_rev2 = get_A_rev_sparse(state_curr, k)
+            X_mid = expm_multiply(A_rev2.T * dt2, X_curr_block) 
         
             dt1 = t_s - t_prev # left interval: (t_{k-1}, state_switch_time]
-            A_rev1 = get_A_rev_sparse(state_prev, k) # reverse_generator_sparse(A[state_prev], mu_k) 
+            A_rev1 = get_A_rev_sparse(state_prev, k) 
             X_prev = expm_multiply(A_rev1.T * dt1, X_mid) 
 
+        X_bw[:, k, mask] = X_curr_block
         X_curr[:, mask] = X_prev
-        X_bw[:, k-1, mask] = X_prev
     
+    X_bw[:, k-1, mask] = X_prev
+
     # Cells at t=0 only have observed data
     mask = t_obs == 0   
     X_bw[:, 0, mask] = X_curr[:, mask]
-    
+
     return X_bw
 
 ################################################################################
