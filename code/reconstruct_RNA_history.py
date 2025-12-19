@@ -82,8 +82,7 @@ def reverse_generator(A, mu):
     ## https://link.springer.com/book/10.1007/978-1-4612-3038-0 (p. 239)
 
     mu_safe = np.maximum(mu, 1e-12)
-    ratio = mu_safe[None, :] / mu_safe[:, None]
-    A_rev_off = (A.T.multiply(ratio)) # A_rev_off = (A.T * mu_safe) / mu_safe[:, None]   # uses broadcasting, no diag matrices
+    A_rev_off = (A.T * mu_safe) / mu_safe[:, None]   # uses broadcasting, no diag matrices
     np.fill_diagonal(A_rev_off, 0.0)
     A_rev = A_rev_off.copy()
     A_rev[np.diag_indices_from(A_rev)] = -A_rev_off.sum(axis=1) # Diagonals must be -sum(row)
@@ -360,6 +359,7 @@ def get_A_rev_sparse(state_idx, k):
     mu_k = X_fwd_gene[:, k]
     return reverse_generator_sparse(A_gene[state_idx], mu_k)
 
+@lru_cache(maxsize=None)
 def get_expm_rev_sparse(state_idx, k, dt):
     """
     Cached expm(A_rev(state_idx, k) * dt) for BACKWARD direction.
@@ -367,11 +367,17 @@ def get_expm_rev_sparse(state_idx, k, dt):
     A_rev = get_A_rev_sparse(state_idx, k)
     return la.expm(A_rev * dt)
 
+@lru_cache(maxsize=None)
+def get_A_rev_sparse_to_dense(state_idx, k):
+    mu_k = X_fwd_gene[:, k]
+    return reverse_generator_sparse(A_gene[state_idx], mu_k)
+
+@lru_cache(maxsize=None)
 def get_expm_rev_sparse_to_dense(state_idx, k, dt):
     """
     Cached expm(A_rev(state_idx, k) * dt) for BACKWARD direction.
     """
-    A_rev = get_A_rev_sparse(state_idx, k)
+    A_rev = get_A_rev_sparse_to_dense(state_idx, k)
     return la.expm(A_rev.toarray() * dt)
 
 def backward_distribution_sparse_to_dense(Y, Q, states, index_for, t, tau, state_grid):
