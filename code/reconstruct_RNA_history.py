@@ -314,8 +314,8 @@ def highest_prob_state_in_X_bw(X_bw, states, t_obs):
     S_per_cell = np.full((n_cells, n_t), -1, dtype=int) 
 
     for cell_idx in range(0, n_cells):
-        t_max = t_obs[cell_idx]
-        probs_slice = X_bw[:, :t_max + 1, cell_idx] 
+        t_max = t_obs[cell_idx] + 1
+        probs_slice = X_bw[:, :t_max, cell_idx] 
         top_state_idx = np.argmax(probs_slice, axis=0) # most probable state index at each time 
             
         U_per_cell[cell_idx, :t_max] = states_arr[top_state_idx, 0] 
