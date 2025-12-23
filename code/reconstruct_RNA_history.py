@@ -304,7 +304,15 @@ def backward_distribution(Y, Q, states, index_for, t, tau, state_grid):
     
     return X_bw
 
-def highest_prob_state_in_X_bw(X_bw, states, t_obs):
+def max_RNAs(Y, gene_idx, frac_added=0.1):
+    U_max_lb = np.max(Y[:, gene_idx, 0])
+    S_max_lb = np.max(Y[:, gene_idx, 1])
+    U_max = (U_max_lb + np.ceil(U_max_lb * frac_added)).astype("int")
+    S_max = (S_max_lb + np.ceil(S_max_lb * frac_added)).astype("int")
+    return U_max, S_max
+
+def highest_prob_state_in_X_bw(X_bw, Q, states):
+    t_obs = np.argmax(Q, axis=1)
     states_arr = np.asarray(states) 
     
     n_cells = X_bw.shape[2]
@@ -322,6 +330,11 @@ def highest_prob_state_in_X_bw(X_bw, states, t_obs):
         S_per_cell[cell_idx, :t_max] = states_arr[top_state_idx, 1] 
     
     return U_per_cell, S_per_cell 
+
+def highest_prob_state_in_X_fwd(X_fwd, states):
+    states_arr = np.asarray(states) 
+    top_state_idx = np.argmax(X_fwd, axis=0)
+    return states_arr[top_state_idx, 0], states_arr[top_state_idx, 1] 
 
 ########################################################################################################################################################################
 ################################################################################ SPARSE ################################################################################
