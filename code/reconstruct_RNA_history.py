@@ -140,7 +140,7 @@ def forward_distribution(A, pi, states, t, tau, state_grid):
     # Start with stationary distribution at t < 0 (system starts in steady state)
     X_fwd = np.zeros(shape=(len(states), len(t)))
     dt = np.mean(np.diff(t)) 
-    X_fwd[:, 0] = expm_multiply(A[0].T * dt, pi)
+    X_fwd[:, 0] = pi # expm_multiply(A[0].T * dt, pi)
     
     for k in range(0, len(t)-1): 
         t_curr, t_next = t[k], t[k+1]
@@ -157,11 +157,11 @@ def forward_distribution(A, pi, states, t, tau, state_grid):
             t_s = tau[state_next]
 
             # Split forward march into 2 steps
-            dt1 = t_s - t_curr # left interval: [t_k, state_switch_time)
+            dt1 = t_s - t_curr # left interval duration over interval [t_k, state_switch_time)
             M1 = get_expm(state_curr,  dt1)
             x_mid = x_curr @ M1  
       
-            dt2 = t_next - t_s # right interval: [state_switch_time, t_{k+1})
+            dt2 = t_next - t_s # right interval duration: [state_switch_time, t_{k+1})
             M2 = get_expm(state_next, dt2)
             x_next = x_mid @ M2
              
@@ -182,13 +182,13 @@ def forward_distribution_blocked(A, pi, states, t, tau, state_grid):
     # Start with stationary distribution at t < 0 (system starts in steady state)
     X_fwd = np.zeros(shape=(n_states, len(t)))
     dt = np.mean(np.diff(t)) 
-    X_fwd[:, 0] = expm_multiply(A[0].T * dt, pi)
+    X_fwd[:, 0] = pi # expm_multiply(A[0].T * dt, pi)
 
     k = 0
     while k < n_t - 1:
         s = state_grid[k]
 
-        # ---- find maximal constant-state block starting at k ----
+        # ---- find maximal constant-state block starting at k (i.e. don't calculate per time step if it can be avoided) ----
         k_block_end = k
         while (
             k_block_end < n_t - 1
@@ -231,14 +231,14 @@ def forward_distribution_blocked(A, pi, states, t, tau, state_grid):
                 dt = t_next - t_curr
                 x_next = expm_multiply(A[state_curr].T * dt, x_curr)
             else:
-                # State switch happens somewhere inside (t_curr, t_next]
+                # State switch happens somewhere inside [t_curr, t_next)
                 t_s = tau[state_next]
 
                 # left sub-interval: [t_curr, t_s)
                 dt1 = t_s - t_curr
                 x_mid = expm_multiply(A[state_curr].T * dt1, x_curr)
 
-                # right sub-interval: [t_s, t_next]
+                # right sub-interval: [t_s, t_next)
                 dt2 = t_next - t_s
                 x_next = expm_multiply(A[state_next].T * dt2, x_mid)
 
@@ -271,7 +271,7 @@ def backward_distribution(Y, Q, states, index_for, t, tau, state_grid):
         t_prev, t_curr = t[k-1], t[k]
         state_prev, state_curr = state_grid[k-1], state_grid[k]
 
-        # Only calculate backwards trajectory for cells at t = t[k] or later
+        # Only calculate backwards trajectory for cells at t[k] or later
         mask = t_obs >= k
         X_curr_block = X_curr[:, mask]
         
@@ -298,7 +298,7 @@ def backward_distribution(Y, Q, states, index_for, t, tau, state_grid):
         
     X_bw[:, k-1, mask] = X_prev
 
-    # Cells at t=0 only have observed data
+    # Cells at t[0] only have observed data (no reconstruction)
     mask = t_obs == 0   
     X_bw[:, 0, mask] = X_curr[:, mask]
     
